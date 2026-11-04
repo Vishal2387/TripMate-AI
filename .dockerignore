@@ -1,0 +1,31 @@
+# Environments & secrets
+.env
+.envrc
+.venv
+env/
+venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# VCS & editor
+.git
+.gitignore
+.vscode/
+.idea/
+
+# Project extras not needed in the image
+tests/
+demo.excalidraw
+Dockerfile
+.dockerignore
+README.md
