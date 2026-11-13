@@ -64,12 +64,10 @@ def final_agent(state: TravelState) -> dict:
         )
     else:
         feedback = (
-            state.get("human_feedback", "")
-            or "Improve the draft before finalizing it."
+            state.get("human_feedback", "") or "Improve the draft before finalizing it."
         )
         review_instruction = (
-            "The user requested a revision. "
-            f"Apply this feedback carefully:\n{feedback}"
+            f"The user requested a revision. Apply this feedback carefully:\n{feedback}"
         )
 
     prompt = prompts.FINAL_AGENT_PROMPT.format(

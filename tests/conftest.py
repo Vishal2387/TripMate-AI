@@ -49,9 +49,7 @@ class FakePlanner:
         self.start_calls.append({"user_input": user_input, "thread_id": thread_id})
         return self._result(thread_id or "thread-new", requires_approval=True)
 
-    async def resume(
-        self, thread_id: str, approved: bool, feedback: str = ""
-    ) -> dict:
+    async def resume(self, thread_id: str, approved: bool, feedback: str = "") -> dict:
         self.resume_calls.append(
             {"thread_id": thread_id, "approved": approved, "feedback": feedback}
         )

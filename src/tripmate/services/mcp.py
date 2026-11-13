@@ -130,6 +130,4 @@ async def check_all_servers() -> None:
             names = ", ".join(tool.name for tool in tools) or "no tools"
             logger.info("%s: OK -> %s", server_name, names)
         except Exception as exc:
-            logger.error(
-                "%s: FAILED -> %s: %s", server_name, type(exc).__name__, exc
-            )
+            logger.error("%s: FAILED -> %s: %s", server_name, type(exc).__name__, exc)

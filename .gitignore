@@ -219,3 +219,6 @@ __marimo__/
 
 # Personal learning notes (annotated code copies, not part of the app)
 syntax_guide/
+
+# Personal interview-prep notes (kept local, not part of the app)
+docs/

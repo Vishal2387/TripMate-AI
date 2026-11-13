@@ -1,0 +1,275 @@
+# =============================================================================
+# TripMate-AI CI/CD pipeline
+#
+# Flow:  lint ─┐
+#              ├─> docker (build; push to ECR on main) ─> deploy (EC2 via SSM, main only)
+#        test ─┘
+# =============================================================================
+name: CI/CD
+
+# --- Triggers ---------------------------------------------------------------
+on:
+  push:
+    # Run on every push to main (this is what triggers push to ECR + deploy).
+    branches: [main]
+  pull_request:
+    # Run lint/test/build-check on PRs targeting main (nothing is pushed).
+    branches: [main]
+  # Adds a "Run workflow" button in the GitHub Actions UI.
+  workflow_dispatch:
+
+# --- Concurrency ------------------------------------------------------------
+# Only one run per workflow + branch at a time. When a new commit lands on a
+# PR, the older in-progress run is cancelled. Runs on main are never cancelled,
+# so a deploy can't be interrupted half-way.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# --- Default token permissions (least privilege) ----------------------------
+# Jobs only get read access to repo contents unless they ask for more.
+permissions:
+  contents: read
+
+# --- Repository variables (Settings -> Secrets and variables -> Actions) ----
+#   AWS_REGION, AWS_ROLE_ARN, ECR_REPOSITORY, EC2_INSTANCE_ID, APP_URL
+# None are secret: app secrets live in AWS SSM Parameter Store (/tripmate/*).
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # CI: lint + tests (no secrets needed; tests use a fake planner)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      # Download the repository source onto the runner.
+      - uses: actions/checkout@v4
+
+      # Install the `uv` package manager (the project uses uv + uv.lock).
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Cache uv's download cache between runs to speed up installs.
+          enable-cache: true
+
+      # Create .venv and install exact versions from uv.lock.
+      # --frozen = fail instead of silently updating uv.lock if it is stale.
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Static analysis using the rules in [tool.ruff.lint] in pyproject.toml
+      # (pycodestyle, pyflakes, isort, bugbear, pyupgrade, simplify).
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      # Verify code is formatted the way `ruff format` would write it.
+      # Check-only: it reports differences but does not modify any file.
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel the other Python version if one fails; see both results.
+      fail-fast: false
+      matrix:
+        # Project requires >=3.11; test the minimum and the next release.
+        python-version: ["3.11", "3.12"]
+    steps:
+      # Download the repository source onto the runner.
+      - uses: actions/checkout@v4
+
+      # Install uv and select the matrix Python version.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      # Install exact locked dependencies, including the dev group
+      # (pytest, httpx, ruff).
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Run the test suite in tests/ (config in [tool.pytest.ini_options]).
+      - name: Run pytest
+        # Dummy values: tripmate.config requires these at import time, but the
+        # tests inject a fake planner so no real DB / LLM / MCP is contacted.
+        env:
+          GROQ_API_KEY: test-groq-key
+          DATABASE_URL: postgresql://test:test@localhost:5432/test
+        run: uv run pytest
+
+  # ---------------------------------------------------------------------------
+  # Build: build the image once. PRs: build only. main: also push to ECR,
+  # authenticating with GitHub OIDC (no AWS keys stored in GitHub).
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Build & push image
+    # Only build once both lint and all test matrix jobs have passed.
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the job request a short-lived OIDC token that AWS exchanges for
+      # temporary credentials of the github-actions-tripmate role.
+      id-token: write
+    env:
+      # Push only from main (the IAM role trust policy only allows main).
+      PUSH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    outputs:
+      # Immutable image reference handed to the deploy job.
+      image: ${{ steps.vars.outputs.image }}
+    steps:
+      # Download the repository source (the Docker build context).
+      - uses: actions/checkout@v4
+
+      # Set up Docker Buildx: enables BuildKit features used by the Dockerfile
+      # (cache mounts) and the GitHub Actions layer cache below.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Exchange the GitHub OIDC token for temporary AWS credentials.
+      - name: Configure AWS credentials (OIDC)
+        if: env.PUSH == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          # The account ID is part of the image URI passed to the deploy job;
+          # masking it would make GitHub drop that job output.
+          mask-aws-account-id: false
+
+      # Docker login to the private ECR registry using those credentials.
+      - name: Log in to Amazon ECR
+        if: env.PUSH == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Image name: <registry>/<repo>:sha-<short-sha> (plus :latest).
+      # The SHA tag makes every deploy traceable to a commit and easy to roll back.
+      - name: Compute image name
+        id: vars
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry || 'local' }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY || 'tripmate-ai' }}
+        run: |
+          echo "repo=${REGISTRY}/${REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "image=${REGISTRY}/${REPOSITORY}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # Build the image from ./Dockerfile. PRs: build only (proves the
+      # Dockerfile works). main: build + push to ECR.
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ env.PUSH == 'true' }}
+          tags: |
+            ${{ steps.vars.outputs.image }}
+            ${{ steps.vars.outputs.repo }}:latest
+          # Reuse Docker layers across runs via the GitHub Actions cache.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # CD: deploy the exact image that was just pushed to EC2 via SSM Run Command
+  # (no SSH, no open port 22), then verify the public /health endpoint.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to EC2
+    # Wait for the image to be built and pushed.
+    needs: docker
+    # Deploy only from main (never on PRs).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # GitHub "production" environment: shows the live URL on the run page and
+    # can require a manual approval (Settings -> Environments).
+    environment:
+      name: production
+      url: ${{ vars.APP_URL }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Needed for deploy/remote-deploy.sh.
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Send deploy/remote-deploy.sh to the instance and wait for the result.
+      # The script pulls the image, loads secrets from Parameter Store,
+      # restarts the container, checks /health and rolls back on failure.
+      - name: Deploy via SSM Run Command
+        env:
+          IMAGE_URI: ${{ needs.docker.outputs.image }}
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          echo "Deploying $IMAGE_URI to $INSTANCE_ID"
+
+          # Ship the script base64-encoded so no shell quoting can break it.
+          SCRIPT_B64=$(base64 -w0 deploy/remote-deploy.sh)
+          PARAMS=$(jq -n --arg b64 "$SCRIPT_B64" --arg img "$IMAGE_URI" --arg region "$REGION" '{
+            commands: [
+              "echo \($b64) | base64 -d > /tmp/tripmate-deploy.sh",
+              "IMAGE_URI=\($img) AWS_REGION=\($region) bash /tmp/tripmate-deploy.sh"
+            ],
+            executionTimeout: ["600"]
+          }')
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy ${GITHUB_SHA::7}" \
+            --parameters "$PARAMS" \
+            --query Command.CommandId --output text)
+          echo "SSM command id: $CMD_ID"
+
+          # Poll until the command finishes (max ~10 minutes).
+          STATUS=Pending
+          for _ in $(seq 1 60); do
+            sleep 10
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            echo "status: $STATUS"
+            case "$STATUS" in
+              Pending|InProgress|Delayed) continue ;;
+              *) break ;;
+            esac
+          done
+
+          echo "----- instance output -----"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text
+          echo "----- instance errors -----"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardErrorContent --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::Deploy failed on the instance (status: $STATUS)"
+            exit 1
+          fi
+
+      # Final gate: the app must answer on its public URL.
+      - name: Smoke test public /health
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          for _ in $(seq 1 12); do
+            if curl -fsS --max-time 5 "$APP_URL/health"; then
+              echo
+              echo "App is healthy at $APP_URL"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$APP_URL/health did not respond"
+          exit 1

@@ -32,9 +32,7 @@ def serialize_result(result: dict[str, Any], thread_id: str) -> dict[str, Any]:
     interrupt_payload = _interrupt_payload(result)
 
     if interrupt_payload:
-        answer = interrupt_payload.get("draft_itinerary") or result.get(
-            "itinerary", ""
-        )
+        answer = interrupt_payload.get("draft_itinerary") or result.get("itinerary", "")
 
     return {
         "thread_id": thread_id,
@@ -107,6 +105,4 @@ class TravelPlanner:
         """Resume the paused LangGraph thread after human review."""
         if not thread_id:
             raise ValueError("thread_id is required to resume a travel plan.")
-        return await asyncio.to_thread(
-            self._resume_sync, thread_id, approved, feedback
-        )
+        return await asyncio.to_thread(self._resume_sync, thread_id, approved, feedback)

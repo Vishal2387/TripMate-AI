@@ -53,9 +53,7 @@ def _run_supervisor(query: str) -> tuple[list[str], dict, str, int]:
 
         requested = parsed.get("selected_agents", [])
         selected = [
-            name
-            for name in AGENT_ORDER
-            if name in requested and name in KNOWN_AGENTS
+            name for name in AGENT_ORDER if name in requested and name in KNOWN_AGENTS
         ]
         # The itinerary agent integrates whichever specialist results
         # were selected, so it is always required.
