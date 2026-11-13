@@ -263,6 +263,7 @@ jobs:
         env:
           APP_URL: ${{ vars.APP_URL }}
         run: |
+          APP_URL="$(echo "$APP_URL" | xargs)"   # trim stray whitespace
           for _ in $(seq 1 12); do
             if curl -fsS --max-time 5 "$APP_URL/health"; then
               echo

@@ -33,10 +33,16 @@ echo "==> Loading secrets from Parameter Store (/tripmate/)"
 install -d -m 700 "$ENV_DIR"
 umask 077
 # /tripmate/GROQ_API_KEY -> GROQ_API_KEY=<value>   (values are never printed)
+# Leading/trailing whitespace is trimmed: a stray space pasted before
+# "postgresql://" makes psycopg reject the whole connection string.
 aws ssm get-parameters-by-path \
     --region "$AWS_REGION" --path /tripmate/ --with-decryption \
     --query 'Parameters[].[Name,Value]' --output text \
-  | awk -F'\t' '{ name = $1; sub("^/tripmate/", "", name); print name "=" $2 }' \
+  | awk -F'\t' '{
+      name = $1; sub("^/tripmate/", "", name)
+      value = $2; gsub(/^[ \t\r]+|[ \t\r]+$/, "", value)
+      print name "=" value
+    }' \
   > "$ENV_FILE.new"
 mv "$ENV_FILE.new" "$ENV_FILE"
 echo "    loaded: $(cut -d= -f1 "$ENV_FILE" | tr '\n' ' ')"
@@ -76,7 +82,10 @@ if wait_healthy; then
 fi
 
 echo "!! New container did not become healthy. Last log lines:"
-docker logs --tail 50 "$APP_NAME" 2>&1 || true
+# Redact credentials in any connection string (scheme://user:password@host)
+# before the logs reach SSM / GitHub output.
+docker logs --tail 50 "$APP_NAME" 2>&1 \
+  | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^@/[:space:]]+@#\1***@#g' || true
 docker rm -f "$APP_NAME" >/dev/null 2>&1 || true
 
 if [ -n "$PREVIOUS_IMAGE" ] && [ "$PREVIOUS_IMAGE" != "$IMAGE_URI" ]; then
