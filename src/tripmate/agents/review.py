@@ -4,7 +4,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
 
 from tripmate.agents import prompts
-from tripmate.agents.llm import get_llm
+from tripmate.agents.llm import clip, get_llm
 from tripmate.agents.state import TravelState
 
 
@@ -12,10 +12,10 @@ def itinerary_agent(state: TravelState) -> dict:
     prompt = prompts.ITINERARY_AGENT_PROMPT.format(
         query=state["user_query"],
         trip_constraints=state.get("trip_constraints", {}),
-        flight_results=state.get("flight_results", ""),
-        hotel_results=state.get("hotel_results", ""),
-        weather_results=state.get("weather_results", ""),
-        budget_results=state.get("budget_results", ""),
+        flight_results=clip(state.get("flight_results", "")),
+        hotel_results=clip(state.get("hotel_results", ""), 2500),
+        weather_results=clip(state.get("weather_results", "")),
+        budget_results=clip(state.get("budget_results", "")),
     )
 
     response = get_llm().invoke(
@@ -74,10 +74,10 @@ def final_agent(state: TravelState) -> dict:
         review_instruction=review_instruction,
         query=state["user_query"],
         trip_constraints=state.get("trip_constraints", {}),
-        flight_results=state.get("flight_results", ""),
-        hotel_results=state.get("hotel_results", ""),
-        weather_results=state.get("weather_results", ""),
-        budget_results=state.get("budget_results", ""),
+        flight_results=clip(state.get("flight_results", "")),
+        hotel_results=clip(state.get("hotel_results", ""), 2500),
+        weather_results=clip(state.get("weather_results", "")),
+        budget_results=clip(state.get("budget_results", "")),
         itinerary=state.get("itinerary", ""),
     )
 
